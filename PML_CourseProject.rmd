@@ -1,0 +1,234 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Frank Chi"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: html_document
+keep_md: true
+---
+<style type="text/css">
+body{ /* Normal  */
+      font-size: 12px;
+  }
+td {  /* Table  */
+  font-size: 12px;
+}
+h1.title {
+  font-size: 38px;
+  color: DarkRed;
+}
+h1 { /* Header 1 */
+  font-size: 28px;
+  color: DarkBlue;
+}
+h2 { /* Header 2 */
+    font-size: 22px;
+  color: DarkBlue;
+}
+h3 { /* Header 3 */
+  font-size: 18px;
+  font-family: "Times New Roman", Times, serif;
+  color: DarkBlue;
+}
+code.r{ /* Code block */
+    font-size: 12px;
+}
+pre { /* Code block - determines code spacing between lines */
+    font-size: 14px;
+}
+</style>
+
+```{r setup, include=TRUE, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(fig.width=12, fig.height = 8, warning = FALSE, message = FALSE)
+require(caret); require(ggplot2);
+list_h2=0
+```
+
+## Introduction
+This is a final report of the course projet from Coursera course **Pratice Machine Learning**, as part of **Data Science Specialization**.<br/>  
+The goal of this project is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which they did the exercise. Those Six participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.   
+<br/>
+More information of the project background is available from the website here: <http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset).  
+</br>
+The report contains:<br/>
+* Question  
+* Getting input data  
+* how to select featurew  
+* how the model has been built  
+* how to do cross validation  
+* what the expected out of sample error is  
+* use the final prediction model to evaluate 20 different test cases  
+
+## Question
+To use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which they did the exercise.
+
+## Getting input data
+The data for this project were download from following site and stored on the **data** folder under the project:<br/>
+* The training data (`pml.train`): <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>.  
+* The test data (`pml.test`): <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>.  
+
+```{r gettingdata, echo=FALSE}
+    ## read data
+    pml.train<- read.csv("data/pml-training.csv", header=TRUE, sep=",", stringsAsFactors=FALSE, na.strings = c("","NA","#DIV/0!"))
+    pml.test <- read.csv("data/pml-testing.csv" , header=TRUE, sep=",", stringsAsFactors=FALSE, na.strings = c("","NA","#DIV/0!"))
+```
+
+### Create partition
+I will allocate 60% of data from `pml.train` dataset as training set for building model and the rest 40% as testing set for preforming cross validation. 
+The `pml.test` dataset will be used on final prediction. 
+```{r partition, echo=TRUE}
+    ## create partition
+    set.seed(3583)
+    inTrain  <- createDataPartition(pml.train$classe, p = 0.6)[[1]]
+    training <- pml.train[inTrain,]
+    testing  <- pml.train[-inTrain,]
+```
+
+## Selecting variables (features)
+### Removing un-useful variables
+The first 7 variables are adminstrative variables amd not useful for prediction (`r names(training)[1:7]`), these variables are removed from data set.
+
+```{r cleandata, echo=TRUE}
+    ## remove the first 7 variables
+    training <- training[,-(1:7)]; testing<- testing[,-(1:7)]; predicting  <- pml.test[,-(1:7)]
+```
+
+### Removing Near-zero variance variables
+There are many dummy variables or constant variables in dataset, We can easily remove those variables from dataset using `nearZeroVar` command.  
+
+```{r nzv, echo=TRUE}
+    ## identify near zero variance variables
+    y_var <- ncol(training)
+    isnzv <- nearZeroVar(training[,-y_var], saveMetrics = T)
+    training<-training[,names(training)[!isnzv$nzv]]
+    testing<-testing[,names(testing)[!isnzv$nzv]]
+    predicting<-predicting[,names(predicting)[!isnzv$nzv]]
+```
+
+### Removing valiables are mostly NA
+For those varibles that has large amout of measurment (say 97.5%) were missing. These variables also are removed.
+
+```{r na95, echo=TRUE}
+    ## identify variables that has 95% NA observation
+    nearna <- sapply(training, function(x) mean(is.na(x))) > 0.975
+    trainingF<-training[,!nearna]
+    testingF<-testing[,names(testing)[!nearna]]
+    predictingF<-predicting[,names(predicting)[!nearna]]
+```
+
+After removed adminstrative variables, near zero variance variables, and missing measurment variables following variables will be used on predition.
+```{r echo=FALSE}
+    names(trainingF)
+```
+
+## Exploratory data analysis 
+### Correlation Analysis
+The correlation among variables as above is analyzed before fitting model. I calculate the correlation between all predictor variables. And I take its absolute value. 
+```{r analysis, echo=TRUE}
+    require(corrplot)
+    y_var <- ncol(trainingF)
+    corMatrix<-abs(cor(trainingF[,-y_var], use='pair'))
+    diag(corMatrix) <- 0
+    corrplot(corMatrix)
+```
+
+The highly correlated variables are shown dark color in above plot. 
+You can see the detail of high correlation variables on **Appendix** section.
+
+
+## Building Model
+```{r echo=FALSE}
+    testingF$classe <- as.factor(testingF$classe)
+    control_rf <- trainControl(method="cv", number=4)
+```
+In the project I will use 3 training method to build model:  
+* Random forests method  
+* Decision tree  
+* Boosting  
+
+### Random forests
+First of all I am using **Random forests** method to build model. Because random forests method has problem in `caret packate`, 
+I use the method from `randomForest package` directly. 
+```{r rdf, echo=TRUE}
+    require(randomForest)
+    set.seed(3593)
+    trainingF$classe <- as.factor(trainingF$classe)
+    modFit_rdf <- randomForest(classe~ .,data=trainingF, importance=FALSE)
+```
+
+### Decision tree
+Next I am trying to use **Decision tree** method to fit the model.
+
+```{r fit_rpart, echo=TRUE}
+    require(rattle)
+    set.seed(3593)
+    modFit_rpart <- train(classe~ .,data=trainingF, method="rpart", trControl=control_rf)
+```
+
+### Boosting
+The third I am using **Boosting with trees** method to fit the model.
+
+```{r boosting, echo=TRUE}
+    set.seed(3593)
+    modFit_gbm <- train(classe~ .,data=trainingF, method="gbm", trControl=control_rf, verbose=FALSE)
+```
+
+### Evaluation of models
+```{r evaluation, echo=FALSE}
+    pred_rdf <- predict(modFit_rdf, newdata=testingF)
+    eval_rdf<-(confusionMatrix(pred_rdf, testingF$classe))$overall
+
+    pred_rpart <- predict(modFit_rpart, newdata=testingF)
+    eval_rpart<-(confusionMatrix(pred_rpart, testingF$classe))$overall
+    
+    pred_gbm <- predict(modFit_gbm, newdata=testingF)
+    eval_gbm<-(confusionMatrix(pred_gbm, testingF$classe))$overall
+    
+    evaluation<-rbind(eval_rdf, eval_gbm, eval_rpart)
+    rownames(evaluation)<-c('eval_rdf', 'eval_gbm', 'eval_rpart')
+    print(evaluation)
+```
+
+After applied `testing` set to models for cross validation the **Random forests** model 
+achieved accuracy of **`r round(evaluation[1,1]*100,2)`%**, the **Boosting with trees** model 
+yield accuracy of **`r round(evaluation[2,1]*100,2)`%**, and the **Decision tree** model 
+has the worst accuracy of **`r round(evaluation[3,1]*100,2)`%**.
+
+### Out of sample error
+```{r outofsample, echo=FALSE}
+    oosError_rdf   <- 1 - sum(pred_rdf == testingF$classe)/length(pred_rdf)
+    oosError_rpart <- 1 - sum(pred_rpart == testingF$classe)/length(pred_rpart)
+    oosError_gbm   <- 1 - sum(pred_gbm == testingF$classe)/length(pred_gbm)
+    oosError<-rbind(oosError_rdf, oosError_gbm, oosError_rpart)
+    colnames(oosError)<-c('Out-of-Sample Error')
+    print(oosError)
+```
+
+From the above, the **Random forests** model is the best model with **`r round(oosError[1]*100,2)`%** out-of-sample error rate,
+and then the **Boosting with trees** model with **`r round(oosError[2]*100,2)`%** out-of-sample error rate.
+Again, the **Decision tree** model yield the highest out-of-sample error **`r round(oosError[3]*100,2)`%** rate.
+
+## Result and Predicting
+The **Random forests** model is our final chooice for predicting.
+I applied it to the `r nrow(predictingF)` predicting set and the result are shown as below.
+```{r result, echo=TRUE}
+    predict(modFit_rdf, newdata=predictingF)
+```
+
+## Appendix
+### High correlation variables
+```{r analysis2, echo=TRUE}
+    cor80<-which(corMatrix > 0.8, arr.ind=T); print(cor80)
+    qplot(x=trainingF[,cor80[1,1]],y=trainingF[,cor80[1,2]], color=trainingF$classe,
+          xlab=names(trainingF)[cor80[1,1]], ylab=names(trainingF)[cor80[1,2]])
+```
+
+### fancyRpartPlot of decision tree
+```{r fit_rpart2, echo=TRUE}
+    require(rattle)
+    fancyRpartPlot(modFit_rpart$finalModel)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
